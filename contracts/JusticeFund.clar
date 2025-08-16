@@ -403,3 +403,277 @@
         (ok true)
     )
 )
+
+(define-data-var reward-tier-counter uint u0)
+(define-data-var max-rewards-per-campaign uint u10)
+
+(define-map campaign-reward-tiers
+    { campaign-id: uint, tier-id: uint }
+    {
+        title: (string-ascii 100),
+        description: (string-ascii 300),
+        minimum-donation: uint,
+        total-quantity: uint,
+        claimed-quantity: uint,
+        reward-type: (string-ascii 20),
+        delivery-info: (string-ascii 200),
+        estimated-delivery: uint
+    }
+)
+
+(define-map donor-reward-claims
+    { campaign-id: uint, tier-id: uint, donor: principal }
+    {
+        claim-block: uint,
+        fulfillment-status: (string-ascii 20),
+        fulfillment-date: uint,
+        tracking-info: (string-ascii 100)
+    }
+)
+
+(define-map campaign-reward-settings
+    { campaign-id: uint }
+    {
+        rewards-enabled: bool,
+        total-tiers: uint,
+        auto-fulfill-digital: bool
+    }
+)
+
+(define-public (create-reward-tier 
+    (campaign-id uint) 
+    (title (string-ascii 100)) 
+    (description (string-ascii 300)) 
+    (minimum-donation uint) 
+    (total-quantity uint) 
+    (reward-type (string-ascii 20)) 
+    (delivery-info (string-ascii 200)) 
+    (estimated-delivery uint))
+    (let
+        (
+            (campaign (unwrap! (map-get? campaigns { campaign-id: campaign-id }) (err u30)))
+            (campaign-settings (default-to 
+                { rewards-enabled: false, total-tiers: u0, auto-fulfill-digital: false } 
+                (map-get? campaign-reward-settings { campaign-id: campaign-id })))
+            (tier-id (+ (get total-tiers campaign-settings) u1))
+        )
+        (asserts! (is-eq tx-sender (get creator campaign)) (err u31))
+        (asserts! (is-eq (get status campaign) "active") (err u32))
+        (asserts! (< (get total-tiers campaign-settings) (var-get max-rewards-per-campaign)) (err u33))
+        (asserts! (>= minimum-donation min-donation) (err u34))
+        (asserts! (> total-quantity u0) (err u35))
+        (asserts! (> estimated-delivery stacks-block-height) (err u36))
+        
+        (map-set campaign-reward-tiers
+            { campaign-id: campaign-id, tier-id: tier-id }
+            {
+                title: title,
+                description: description,
+                minimum-donation: minimum-donation,
+                total-quantity: total-quantity,
+                claimed-quantity: u0,
+                reward-type: reward-type,
+                delivery-info: delivery-info,
+                estimated-delivery: estimated-delivery
+            }
+        )
+        
+        (map-set campaign-reward-settings
+            { campaign-id: campaign-id }
+            (merge campaign-settings 
+                { 
+                    rewards-enabled: true, 
+                    total-tiers: tier-id 
+                })
+        )
+        
+        (ok tier-id)
+    )
+)
+
+(define-public (claim-reward (campaign-id uint) (tier-id uint))
+    (let
+        (
+            (campaign (unwrap! (map-get? campaigns { campaign-id: campaign-id }) (err u37)))
+            (reward-tier (unwrap! (map-get? campaign-reward-tiers { campaign-id: campaign-id, tier-id: tier-id }) (err u38)))
+            (donor-donation (unwrap! (map-get? campaign-donations { campaign-id: campaign-id, donor: tx-sender }) (err u39)))
+            (existing-claim (map-get? donor-reward-claims { campaign-id: campaign-id, tier-id: tier-id, donor: tx-sender }))
+        )
+        (asserts! (is-none existing-claim) (err u40))
+        (asserts! (>= (get amount donor-donation) (get minimum-donation reward-tier)) (err u41))
+        (asserts! (< (get claimed-quantity reward-tier) (get total-quantity reward-tier)) (err u42))
+        
+        (map-set donor-reward-claims
+            { campaign-id: campaign-id, tier-id: tier-id, donor: tx-sender }
+            {
+                claim-block: stacks-block-height,
+                fulfillment-status: (if (is-eq (get reward-type reward-tier) "digital") "fulfilled" "pending"),
+                fulfillment-date: (if (is-eq (get reward-type reward-tier) "digital") stacks-block-height u0),
+                tracking-info: ""
+            }
+        )
+        
+        (map-set campaign-reward-tiers
+            { campaign-id: campaign-id, tier-id: tier-id }
+            (merge reward-tier { claimed-quantity: (+ (get claimed-quantity reward-tier) u1) })
+        )
+        
+        (ok true)
+    )
+)
+
+(define-public (update-reward-fulfillment 
+    (campaign-id uint) 
+    (tier-id uint) 
+    (donor principal) 
+    (fulfillment-status (string-ascii 20)) 
+    (tracking-info (string-ascii 100)))
+    (let
+        (
+            (campaign (unwrap! (map-get? campaigns { campaign-id: campaign-id }) (err u43)))
+            (reward-claim (unwrap! (map-get? donor-reward-claims { campaign-id: campaign-id, tier-id: tier-id, donor: donor }) (err u44)))
+        )
+        (asserts! (is-eq tx-sender (get creator campaign)) (err u45))
+        
+        (map-set donor-reward-claims
+            { campaign-id: campaign-id, tier-id: tier-id, donor: donor }
+            (merge reward-claim 
+                {
+                    fulfillment-status: fulfillment-status,
+                    fulfillment-date: (if (is-eq fulfillment-status "fulfilled") stacks-block-height (get fulfillment-date reward-claim)),
+                    tracking-info: tracking-info
+                })
+        )
+        
+        (ok true)
+    )
+)
+
+(define-public (bulk-fulfill-digital-rewards (campaign-id uint) (tier-id uint))
+    (let
+        (
+            (campaign (unwrap! (map-get? campaigns { campaign-id: campaign-id }) (err u46)))
+            (reward-tier (unwrap! (map-get? campaign-reward-tiers { campaign-id: campaign-id, tier-id: tier-id }) (err u47)))
+        )
+        (asserts! (is-eq tx-sender (get creator campaign)) (err u48))
+        (asserts! (is-eq (get reward-type reward-tier) "digital") (err u49))
+        
+        (ok true)
+    )
+)
+
+(define-public (update-reward-tier-quantity (campaign-id uint) (tier-id uint) (new-quantity uint))
+    (let
+        (
+            (campaign (unwrap! (map-get? campaigns { campaign-id: campaign-id }) (err u50)))
+            (reward-tier (unwrap! (map-get? campaign-reward-tiers { campaign-id: campaign-id, tier-id: tier-id }) (err u51)))
+        )
+        (asserts! (is-eq tx-sender (get creator campaign)) (err u52))
+        (asserts! (is-eq (get status campaign) "active") (err u53))
+        (asserts! (>= new-quantity (get claimed-quantity reward-tier)) (err u54))
+        
+        (map-set campaign-reward-tiers
+            { campaign-id: campaign-id, tier-id: tier-id }
+            (merge reward-tier { total-quantity: new-quantity })
+        )
+        
+        (ok true)
+    )
+)
+
+(define-private (check-reward-eligibility (campaign-id uint) (donor principal))
+    (let
+        (
+            (donor-donation (map-get? campaign-donations { campaign-id: campaign-id, donor: donor }))
+            (campaign-settings (map-get? campaign-reward-settings { campaign-id: campaign-id }))
+        )
+        (and 
+            (is-some donor-donation)
+            (is-some campaign-settings)
+            (get rewards-enabled (unwrap-panic campaign-settings))
+        )
+    )
+)
+
+(define-private (get-eligible-reward-tiers (campaign-id uint) (donation-amount uint))
+    (let
+        (
+            (campaign-settings (map-get? campaign-reward-settings { campaign-id: campaign-id }))
+        )
+        (if (is-some campaign-settings)
+            (get total-tiers (unwrap-panic campaign-settings))
+            u0)
+    )
+)
+
+(define-read-only (get-campaign-reward-tier (campaign-id uint) (tier-id uint))
+    (ok (map-get? campaign-reward-tiers { campaign-id: campaign-id, tier-id: tier-id }))
+)
+
+(define-read-only (get-donor-reward-claim (campaign-id uint) (tier-id uint) (donor principal))
+    (ok (map-get? donor-reward-claims { campaign-id: campaign-id, tier-id: tier-id, donor: donor }))
+)
+
+(define-read-only (get-campaign-reward-settings (campaign-id uint))
+    (ok (map-get? campaign-reward-settings { campaign-id: campaign-id }))
+)
+
+(define-read-only (get-reward-tier-availability (campaign-id uint) (tier-id uint))
+    (let
+        (
+            (reward-tier (map-get? campaign-reward-tiers { campaign-id: campaign-id, tier-id: tier-id }))
+        )
+        (if (is-some reward-tier)
+            (let
+                (
+                    (tier-data (unwrap-panic reward-tier))
+                )
+                (ok (some {
+                    available: (- (get total-quantity tier-data) (get claimed-quantity tier-data)),
+                    total: (get total-quantity tier-data),
+                    claimed: (get claimed-quantity tier-data)
+                }))
+            )
+            (ok none)
+        )
+    )
+)
+
+(define-read-only (get-donor-eligible-rewards (campaign-id uint) (donor principal))
+    (let
+        (
+            (donor-donation (map-get? campaign-donations { campaign-id: campaign-id, donor: donor }))
+            (campaign-settings (map-get? campaign-reward-settings { campaign-id: campaign-id }))
+        )
+        (if (and (is-some donor-donation) (is-some campaign-settings))
+            (ok (some {
+                donation-amount: (get amount (unwrap-panic donor-donation)),
+                rewards-enabled: (get rewards-enabled (unwrap-panic campaign-settings)),
+                total-tiers: (get total-tiers (unwrap-panic campaign-settings))
+            }))
+            (ok none)
+        )
+    )
+)
+
+(define-public (toggle-campaign-rewards (campaign-id uint) (enabled bool))
+    (let
+        (
+            (campaign (unwrap! (map-get? campaigns { campaign-id: campaign-id }) (err u55)))
+            (campaign-settings (default-to 
+                { rewards-enabled: false, total-tiers: u0, auto-fulfill-digital: false } 
+                (map-get? campaign-reward-settings { campaign-id: campaign-id })))
+        )
+        (asserts! (is-eq tx-sender (get creator campaign)) (err u56))
+        (asserts! (is-eq (get status campaign) "active") (err u57))
+        
+        (map-set campaign-reward-settings
+            { campaign-id: campaign-id }
+            (merge campaign-settings { rewards-enabled: enabled })
+        )
+        
+        (ok true)
+    )
+)
+
+
